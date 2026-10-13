@@ -1,4 +1,5 @@
-# DSCI552_HW3
+DSCI552 Machine Learning for Data Science Homework 3 
+Instructor: Mohammad Reza Rajati
 
 1. Time Series Classification Part 1: Feature Creation/Extraction
 An interesting task in machine learning is classification of time series. In this problem,
