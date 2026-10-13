@@ -1,0 +1,176 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+# Directory setup for data files 
+NOTEBOOK_DIR = Path('.').resolve()
+
+if NOTEBOOK_DIR.name.strip().lower() in ['notebook', 'notebooks']:
+    PROJECT_ROOT = NOTEBOOK_DIR.parent
+else:
+    PROJECT_ROOT = NOTEBOOK_DIR
+
+# Step up to the project root directory, then point to AReM
+DATA_DIR = PROJECT_ROOT / 'AReM'
+
+# Defensive check
+if not DATA_DIR.exists():
+    raise FileNotFoundError(
+        f"Data directory not found at: {DATA_DIR}\n"
+        "Check 'AReM' folder located in the project root folder."
+    )
+
+print(f"Project Root: {PROJECT_ROOT}")
+print(f"Dataset Directory: {DATA_DIR}")
+
+# function to split data into train or test based on the folder name and file name
+def get_split(folder_name, file_name):
+    # Extract the dataset number from file name, e.g., 'dataset1.csv' -> 1
+    dataset_num = int(''.join(filter(str.isdigit, file_name)))
+    
+    if folder_name in ['bending1', 'bending2']:
+        return 'test' if dataset_num in [1, 2] else 'train'
+    else:
+        return 'test' if dataset_num in [1, 2, 3] else 'train'
+    
+    
+### checks get_split function and prints summary statements ###
+# Collections to hold file paths
+train_files = []
+test_files = []
+
+# Loop over all activity folders inside AReM
+for folder_path in sorted(DATA_DIR.iterdir()):
+    if folder_path.is_dir() and not folder_path.name.startswith('.'):
+        folder_name = folder_path.name
+        
+        # Iterate through every CSV file in the activity folder
+        for file_path in sorted(folder_path.glob('*.csv')):
+            file_name = file_path.name
+            split_type = get_split(folder_name, file_name)
+            
+            if split_type == 'test':
+                test_files.append((folder_name, file_name))
+            else:
+                train_files.append((folder_name, file_name))
+
+# Print summary counts
+print(f"Total Train Instances: {len(train_files)}")
+print(f"Total Test Instances:  {len(test_files)}")
+print(f"Total Combined:        {len(train_files) + len(test_files)}")
+print("-" * 50)
+
+# Detailed printout of Test Files per folder
+print("TEST FILES PER FOLDER:")
+for folder, file in test_files:
+    print(f"  [{folder}] -> {file}")
+
+def extract_file_features(file_path, activity_name, split_name, instance_id):
+    # Try reading with skiprows=4 first due to csv file fomrat
+    df = pd.read_csv(file_path, skiprows=4, on_bad_lines='skip', engine='python')
+    
+    # Fallback check if headers are offset differently
+    if not any(col in df.columns for col in ['avg_rss12', 'var_rss12']):
+        df = pd.read_csv(file_path, skiprows=3, on_bad_lines='skip', engine='python')
+
+    sensor_cols = [col for col in df.columns if str(col).strip() in ['avg_rss12', 'var_rss12', 'avg_rss13', 'var_rss13', 'avg_rss23', 'var_rss23']]
+    
+    if not sensor_cols:
+        sensor_cols = list(df.columns[:6])
+        
+    row_data = {
+        'Instance': instance_id,
+        'File_Name': file_path.name,
+        'Activity': activity_name,
+        'Split': split_name
+    }
+    
+    for i, col in enumerate(sensor_cols, start=1):
+        series = pd.to_numeric(df[col], errors='coerce').dropna() # Drop any NaN/empty rows safely
+        
+        # Check if the series is empty to avoid warnings 
+        if len(series) == 0:
+            row_data[f'min_{i}'] = np.nan
+            row_data[f'max_{i}'] = np.nan
+            row_data[f'mean_{i}'] = np.nan
+            row_data[f'median_{i}'] = np.nan
+            row_data[f'std_{i}'] = np.nan
+            row_data[f'1st_quart_{i}'] = np.nan
+            row_data[f'3rd_quart_{i}'] = np.nan
+        else:
+            row_data[f'min_{i}'] = series.min()
+            row_data[f'max_{i}'] = series.max()
+            row_data[f'mean_{i}'] = series.mean()
+            row_data[f'median_{i}'] = series.median()
+            row_data[f'std_{i}'] = series.std()
+            row_data[f'1st_quart_{i}'] = series.quantile(0.25)
+            row_data[f'3rd_quart_{i}'] = series.quantile(0.75)
+        
+    return row_data
+
+# -- Main --- Process All 88 Instances 
+feature_records = []
+instance_counter = 1
+
+for folder_path in sorted(DATA_DIR.iterdir()):
+    if folder_path.is_dir() and not folder_path.name.startswith('.'):
+        folder_name = folder_path.name
+        
+        for file_path in sorted(folder_path.glob('*.csv')):
+            file_name = file_path.name
+            split_type = get_split(folder_name, file_name)
+            
+            features = extract_file_features(file_path, folder_name, split_type, instance_counter)
+            feature_records.append(features)
+            instance_counter += 1
+
+# Display the Final Table 
+feature_matrix = pd.DataFrame(feature_records)
+
+print(f"Feature Matrix Shape: {feature_matrix.shape}")
+
+# Displays table right in notebook
+display(feature_matrix)
+
+# Separate feature columns from metadata 
+metadata_cols = ['Instance', 'File_Name', 'Activity', 'Split']
+feature_cols = [col for col in feature_matrix.columns if col not in metadata_cols]
+
+# Set up bootstrap parameters
+n_bootstrap = 1000       
+confidence_level = 0.90  
+alpha = 1 - confidence_level
+
+np.random.seed(42)       
+bootstrap_results = []
+
+# Loop through each of the 42 features
+for col in feature_cols:
+    data = feature_matrix[col].dropna().values
+    
+    # Calculate the sample standard deviation for feature columns
+    sample_std = np.std(data, ddof=1)
+    
+    # Run bootstrap resampling
+    bootstrap_stds = []
+    for _ in range(n_bootstrap):
+        resample = np.random.choice(data, size=len(data), replace=True)
+        bootstrap_stds.append(np.std(resample, ddof=1))
+        
+    # Calculate 90% CI percentiles (5th and 95th percentiles)
+    ci_lower = np.percentile(bootstrap_stds, (alpha / 2) * 100)
+    ci_upper = np.percentile(bootstrap_stds, (1 - alpha / 2) * 100)
+    
+    # Save results
+    bootstrap_results.append({
+        'Feature': col,
+        'Sample_Std': sample_std,
+        '90%_CI_Lower': ci_lower,
+        '90%_CI_Upper': ci_upper
+    })
+
+# Convert results into a summary DataFrame and display it
+ci_summary_df = pd.DataFrame(bootstrap_results)
+
+print("Bootstrap Standard Deviation Confidence Intervals (90%):")
+display(ci_summary_df.head(10)) 
